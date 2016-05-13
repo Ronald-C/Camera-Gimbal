@@ -18,6 +18,7 @@
  * registers present.
  */
 
+#include <math.h>
 #include "printf_lib.h"     // u0_dbg_printf()
 #include "i2c2.hpp"         // for I2C bus access
 
@@ -28,7 +29,6 @@
 // NOTE: RSV (0x0B), TS1 (0x0D), TS2 (0x0E) DO NOT ACCESS
 
 
-//
 // Accelerometer & Gyroscope Register mapping
 #define GYRO_FULL_SCALE_2000_DPS    0x18
 #define ACC_FULL_SCALE_16_G         0x18
@@ -93,23 +93,13 @@ class MPU9250 : public scheduler_task
             int16_t GyY = get16BitRegister(GYRO_YOUT_H);
             int16_t GyZ = get16BitRegister(GYRO_ZOUT_H);
 
+            double roll = atan2(AcY, AcZ) * 57.2957;
+            double pitch = atan2(double(-AcX), sqrt(double(AcY * AcY) + double(AcZ * AcZ)));
 
-            printf("acc %i %i %i\n", AcX, AcY, AcZ);
-            printf("gyro %i %i %i\n", GyX, GyY, GyZ);
+            printf("roll: %f pitch %f\n", roll, pitch);
             vTaskDelay(1000);
-        /*    if(mpu.readRegisters(MPU9250_ADDRESS_READ, ACCEL_XOUT_H, this->buffer, 14))
-            {
-                AcX = this->buffer[0] << 8 | this->buffer[1];   // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)
-                AcY = this->buffer[2] << 8 | this->buffer[3];   // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
-                AcZ = this->buffer[4] << 8 | this->buffer[5];   // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
 
-                temp = this->buffer[6] << 8 | this->buffer[7];
 
-                GyX = this->buffer[8] << 8 | this->buffer[9];
-                GyY = this->buffer[10] << 8 | this->buffer[11];
-                GyZ = this->buffer[12] << 8 | this->buffer[13];
-
-            }*/
 
             return true;
         }
