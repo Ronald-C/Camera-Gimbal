@@ -26,24 +26,12 @@
 //
 // Magnetometer (AK8963) Register Mapping
 // NOTE: RSV (0x0B), TS1 (0x0D), TS2 (0x0E) DO NOT ACCESS
-#define AK8963_WIA      0x00    // Device ID: Fixed @ 0x48
-#define AK8963_INFO     0x01
-#define AK8963_ST1      0x02    // Data ready status bit 0; DATA STATUS
-#define AK8963_XOUT_L   0x03    // Measurement data . . .
-#define AK8963_XOUT_H   0x04
-#define AK8963_YOUT_L   0x05
-#define AK8963_YOUT_H   0x06
-#define AK8963_ZOUT_L   0x07
-#define AK8963_ZOUT_H   0x08
+
 
 //
 // Accelerometer & Gyroscope Register mapping
 #define GYRO_FULL_SCALE_2000_DPS    0x18
 #define ACC_FULL_SCALE_16_G         0x18
-
-#define PWR_MGMT_1          0x6B
-#define PWR_MGMT_2          0x6C
-#define MPU9250_WAI         0x75 // Identifies as 0x71
 
 // << DEVICE ADDRESSES >>
 #define    AK8963_ADDRESS      0x0C    // Address of magnetometer
@@ -61,7 +49,7 @@ class MPU9250 : public scheduler_task
         {
             // Verify device identity
             uint8_t WAI = mpu.readReg(MPU9250_ADDRESS, MPU9250_WAI);
-            if(WAI == mWhoAmIExpectedValue) {
+            if(WAI == MPU9250_WhoAmIExpectedValue) {
                 u0_dbg_printf("\nI2C Read Test Passed, MPU6500 Address: 0x%x\n", WAI);
 
             } else {
@@ -130,14 +118,28 @@ class MPU9250 : public scheduler_task
         I2C2 &mpu = I2C2::getInstance();        // Get I2C bus semaphore
 
         /// Expected value of Sensor's "WHO AM I" register
-        static const unsigned char mWhoAmIExpectedValue = 0x71;
+        static const unsigned char MPU9250_WhoAmIExpectedValue = 0x71;
         typedef enum {
             GYRO_CONFIG=0x1B, ACCEL_CONFIG=0x1C,
 
             ACCEL_XOUT_H=0x3B, ACCEL_YOUT_H=0x3D, ACCEL_ZOUT_H=0x3F,
             GYRO_XOUT_H=0x43, GYRO_YOUT_H=0x45, GYRO_ZOUT_H=0x47,
 
-        } __attribute__ ((packed)) RegisterMap;
+            PWR_MGMT_1=0x6B, PWR_MGMT_2=0x6C,
+            MPU9250_WAI=0x75,
+
+        } __attribute__ ((packed)) MPU9250_RegisterMap;
+
+        /// Expected value of Sensor's "WHO AM I" register
+        static const unsigned char AK8963_WhoAmIExpectedValue = 0x48;
+        typedef enum {
+            AK8963_WIA=0x00,
+            AK8963_INFO=0x01, AK8963_ST1=0x02,
+
+            AK8963_XOUT_L=0x03, AK8963_XOUT_H=0x04, AK8963_YOUT_L=0x05,
+            AK8963_YOUT_H=0x06, AK8963_ZOUT_L=0x07, AK8963_ZOUT_H=0x08,
+
+        } __attribute__ ((packed)) AK8963_RegisterMap;
 
 };
 
