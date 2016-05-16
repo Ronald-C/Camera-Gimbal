@@ -43,10 +43,13 @@ enum Gscale {
   GFS_2000DPS = 0x18
 };
 
-// << DEVICE ADDRESSES >>
-#define    AK8963_ADDRESS      0x0C    // Address of magnetometer
-#define    MPU9250_ADDRESS     0xd0    // Device address when AD0 = GND
+const float alpha = 0.5;
 
+// << DEVICE ADDRESSES >>
+#define AK8963_ADDRESS      0x0C    // Address of magnetometer
+#define MPU9250_ADDRESS     0xd0    // Device address when AD0 = GND
+
+#define AK8963_READ_BYTE    0x80
 
 class MPU9250 : public scheduler_task
 {
@@ -55,19 +58,14 @@ class MPU9250 : public scheduler_task
         {
         }
 
-        void initAK8963(float )
-        {
-
-        }
-
         void verifyMPU9250(void)
         {
             uint8_t WAI = mpu.readReg(MPU9250_ADDRESS, MPU9250_WAI);
             if(WAI == MPU9250_WhoAmIExpectedValue) {
-                u0_dbg_printf("\nI2C Read Test Passed, MPU6500 Address: 0x%x\n", WAI);
+                u0_dbg_printf("\nI2C Read Test Passed, MPU9250 Address: 0x%x\n", WAI);
 
             } else {
-                u0_dbg_printf("ERROR: I2C MPU6500 Read Test Failed, Stopping\n");
+                u0_dbg_printf("ERROR: I2C MPU9250 Read Test Failed, Stopping, 0x%x\n", WAI);
                 while(1){}  // Infinite loop
             }
         }
@@ -80,7 +78,7 @@ class MPU9250 : public scheduler_task
             // Possible gyro scales (and their register bit settings) are:
             // 250 DPS (00), 500 DPS (01), 1000 DPS (10), and 2000 DPS  (11).
                 case GFS_250DPS:
-                    gyroDivider = 131;
+                    gyroDivider = 131;  // LSB / (deg/s)
                     break;
                 case GFS_500DPS:
                     gyroDivider = 65.5;
@@ -99,7 +97,7 @@ class MPU9250 : public scheduler_task
             mpu.writeReg(MPU9250_ADDRESS, ACCEL_CONFIG, accFS);
             switch (accFS){
                 case AFS_2G:
-                    accDivider = 16384;
+                    accDivider = 16384;     // LSB / g
                     break;
                 case AFS_4G:
                     accDivider = 8192;
@@ -113,10 +111,32 @@ class MPU9250 : public scheduler_task
             }
         }
 
+        void verifyAK8963(void)
+        {
+            configAK8963(AK8963_ADDRESS | AK8963_READ_BYTE, 0x00, 0x81);
+            uint8_t WAI = mpu.readReg(MPU9250_ADDRESS, EXT_SENS_DATA_00);
+            if(WAI == AK8963_WhoAmIExpectedValue) {
+                u0_dbg_printf("\nI2C Read Test Passed, AK8963 Address: 0x%x\n", WAI);
+
+            } else {
+                u0_dbg_printf("ERROR: I2C AK8963 Read Test Failed, Stopping, 0x%x\n", WAI);
+                while(1){}  // Infinite loop
+            }
+        }
+
+        void configAK8963(uint8_t slaveADDR, uint8_t startReg, uint8_t bytesToRead)
+        {
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_ADDR, slaveADDR);    // R/W + SLV_ADDR
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_REG, startReg);
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_CTRL, bytesToRead);
+        }
+
         bool init(void)
         {
             // Initialize MPU9250 device; wake up device
             mpu.writeReg(MPU9250_ADDRESS, PWR_MGMT_1, 0x00);
+
+            mpu.writeReg(MPU9250_ADDRESS, SMPLRT_DIV, 0x00); // Set sample rate to 1 kHz
 
             verifyMPU9250(); // Verify device identity
 
@@ -125,12 +145,25 @@ class MPU9250 : public scheduler_task
             mpu.writeReg(MPU9250_ADDRESS, PWR_MGMT_2, 0x00);
 
             mpu.writeReg(MPU9250_ADDRESS, USER_CTRL, 0x20);     // I2C Master mode
-            mpu.writeReg(MPU9250_ADDRESS, MST_CTRL, 0x0D);      // 400 kHz ; 20 divider
+            mpu.writeReg(MPU9250_ADDRESS, MST_CTRL, 0x0D);
 
             // Set accelerometer & gyroscope sensitivity
-            setGyroScale(GFS_2000DPS);
-            setAccScale(AFS_16G);
+            setGyroScale(GFS_500DPS);
+            setAccScale(AFS_2G);
 
+            // Initialize AK8963 device
+            verifyAK8963();
+
+            configAK8963(AK8963_ADDRESS, AK8963_CNTL2, 0x81);
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_DO, 0x01);   // reset device
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_CTRL, 0x81);
+            for(int i=0; i<1000;i++) {};
+
+            configAK8963(AK8963_ADDRESS, AK8963_CNTL1, 0x81);
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_DO, 0x12);   // 16-bit output + "0010": Continuous measurement mode 1
+            mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_CTRL, 0x81);
+
+            getCompass_calib();
             return true;
         }
 
@@ -161,11 +194,21 @@ class MPU9250 : public scheduler_task
          * 3       | +/- 16g          | 1024 LSB/mg
          * </pre>
          */
-        void getAcceleration(int16_t *rax, int16_t *ray, int16_t *raz)
+        void getAcceleration(float *angleX, float *angleY)
         {
-            *rax = get16BitRegister(ACCEL_XOUT_H) / accDivider;
-            *ray = get16BitRegister(ACCEL_YOUT_H) / accDivider;
-            *raz = get16BitRegister(ACCEL_YOUT_H) / accDivider;
+            int16_t readData[3];
+            readData[0] = get16BitRegister(ACCEL_XOUT_H);
+            readData[1] = get16BitRegister(ACCEL_YOUT_H);
+            readData[2] = get16BitRegister(ACCEL_YOUT_H);
+
+            //Low Pass Filter
+            fXg = readData[0] * alpha + (fXg * (1.0 - alpha));
+            fYg = readData[1] * alpha + (fYg * (1.0 - alpha));
+            fZg = readData[2] * alpha + (fZg * (1.0 - alpha));
+
+            // NOTE: atan2 relies on ratio thus sensitivities may not be needed
+            *angleX = 57.295 * atan2f((float)readData[0], sqrt(pow((float)readData[2], 2) + pow((float)readData[1], 2)));   // roll
+            *angleY = 57.295 * atan2f((float)-readData[1], (float)readData[2]);                                             // pitch
         }
 
         /*
@@ -182,29 +225,54 @@ class MPU9250 : public scheduler_task
          * 3      | +/- 2000 degrees/s | 16.4 LSB/deg/s
          * </pre>
          */
-        void getRotation(int16_t *rgx, int16_t *rgy, int16_t *rgz)
+        void getRotation(float *rgx, float *rgy, float *rgz)
         {
-            *rgx = get16BitRegister(GYRO_XOUT_H) / 16.4;
-            *rgy = get16BitRegister(GYRO_YOUT_H) / 16.4;
-            *rgz = get16BitRegister(GYRO_ZOUT_H) / 16.4;
+            *rgx = get16BitRegister(GYRO_XOUT_H) / gyroDivider;
+            *rgy = get16BitRegister(GYRO_YOUT_H) / gyroDivider;
+            *rgz = get16BitRegister(GYRO_ZOUT_H) / gyroDivider;
+        }
+
+        void getCompass_calib(void)
+        {
+            uint8_t response[3];
+            configAK8963(AK8963_ADDRESS | AK8963_READ_BYTE, AK8963_ASAX, 0x83);
+
+            mpu.readRegisters(MPU9250_ADDRESS, EXT_SENS_DATA_00, response, sizeof(response));
+            for(int i = 0; i < 3; i++) {
+                magnetometer_ASA[i] = ((((response[i] - 128) * 0.5)/ 128) + 1);
+            }
+            // Manufacturer sensitivity adjustment values
+            u0_dbg_printf("ASAX: %f, ASAY: %f, ASAZ: %f\n", magnetometer_ASA[0], magnetometer_ASA[1], magnetometer_ASA[2]);
+        }
+
+        void getCompass(float *gyroDegree)
+        {
+            float rgx, rgy, rgz;
+            // Read AK8963 register 0x03; We read 7 bytes so upon read of ST2 register 0x09,
+            // the device will unlatch the data registers for next measurement read
+            configAK8963(AK8963_ADDRESS | AK8963_READ_BYTE, AK8963_XOUT_L, 0x87);
+
+            rgx = (float)get16BitRegister(EXT_SENS_DATA_00) * magnetometer_ASA[0];
+            rgy = (float)get16BitRegister(EXT_SENS_DATA_02) * magnetometer_ASA[1];
+            rgz = (float)get16BitRegister(EXT_SENS_DATA_04) * magnetometer_ASA[2];
+
+            float tempDegree = atan(rgy / rgz) * 57.295;
+            if(tempDegree < 0) {
+                tempDegree += 360;
+            }
+            *gyroDegree = tempDegree;
         }
 
         bool run(void *p)
         {
-            int16_t AcX, AcY, AcZ, GyX, GyY, GyZ;
+            getAcceleration(&acc_data[0], &acc_data[1]);                        // Accelerometer
+            getRotation(&gyro_data[0], &gyro_data[1], &gyro_data[2]);           // Gyroscope
+            getCompass(&mag_data);                                              // Magnetometer
 
-            getAcceleration(&AcX, &AcY, &AcZ);       // Accelerometer
-            getRotation(&GyX, &GyY, &GyZ);           // Gyroscope
+            //u0_dbg_printf("accX: %f, accY: %f\n", acc_data[0], acc_data[1]);
+            //u0_dbg_printf("mag: %f\n", mag_data);
 
-            double roll = atan2(AcY, AcZ) * 57.2957;
-            double pitch = atan2(double(-AcX), sqrt(double(AcY * AcY) + double(AcZ * AcZ)));
-
-            printf("roll: %f pitch %f\n", roll, pitch);
-            printf("gyro %f %f %f\n", GyX, GyY, GyZ);
-
-            vTaskDelay(2000);
-
-
+            vTaskDelay(1000);
 
             return true;
         }
@@ -212,19 +280,30 @@ class MPU9250 : public scheduler_task
     private:
         I2C2 &mpu = I2C2::getInstance();        // Get I2C bus semaphore
 
-        float accDivider = 0;
-        float gyroDivider = 0;
+        double fXg = 0, fYg = 0, fZg = 0;
+
+        float acc_data[2];
+        float gyro_data[3];
+        float mag_data;
+
+        float magnetometer_ASA[3];
+        float accDivider = -1;
+        float gyroDivider = -1;
 
         /// Expected value of Sensor's "WHO AM I" register
         static const unsigned char MPU9250_WhoAmIExpectedValue = 0x71;
         typedef enum {
-            MST_CTRL=0x24, 
+            SMPLRT_DIV=0x19, MST_CTRL=0x24,
             I2C_SLV0_ADDR=0x25, I2C_SLV0_REG=0x26, I2C_SLV0_CTRL=0x27,
+            I2C_SLV1_ADDR=0x28, I2C_SLV1_REG=0x29, I2C_SLV1_CTRL=0x2A,
 
             GYRO_CONFIG=0x1B, ACCEL_CONFIG=0x1C,
 
             ACCEL_XOUT_H=0x3B, ACCEL_YOUT_H=0x3D, ACCEL_ZOUT_H=0x3F,
             GYRO_XOUT_H=0x43, GYRO_YOUT_H=0x45, GYRO_ZOUT_H=0x47,
+
+            EXT_SENS_DATA_00=0x49, EXT_SENS_DATA_02=0x4B, EXT_SENS_DATA_04=0x4D,
+            I2C_SLV0_DO=0x63,
 
             USER_CTRL=0x6A, PWR_MGMT_1=0x6B, PWR_MGMT_2=0x6C,
             MPU9250_WAI=0x75,
@@ -239,6 +318,10 @@ class MPU9250 : public scheduler_task
 
             AK8963_XOUT_L=0x03, AK8963_XOUT_H=0x04, AK8963_YOUT_L=0x05,
             AK8963_YOUT_H=0x06, AK8963_ZOUT_L=0x07, AK8963_ZOUT_H=0x08,
+
+            AK8963_CNTL1=0x0A, AK8963_CNTL2=0x0B,
+
+            AK8963_ASAX=0x10, AK8963_ASAY=0x11, AK8963_ASAZ=0x12,
 
         } __attribute__ ((packed)) AK8963_RegisterMap;
 
