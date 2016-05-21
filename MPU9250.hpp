@@ -11,10 +11,11 @@
 /**
  * REFERENCE:
  *  -   https://github.com/kriswiner/MPU-9250/blob/master/MPU9250BasicAHRS.ino
+ *  -   https://theccontinuum.com/2012/09/24/arduino-imu-pitch-roll-from-accelerometer/#docs
  *
  * The MPU-9150 contains the MPU-6050 acc/gyro and an AK8975 mag. from AKM. The
- * MPU-9250 contains a MPU-6500 and AK8963. We use the MPU-9265 here, which contains
- * a MPU-6515. Code is mostly backwards compatible except for difference in
+ * MPU-9250 contains a MPU-6500 and AK8963. We use the MPU-9250 here, which contains
+ * a MPU-6500. Code is mostly backwards compatible except for minor differences in
  * registers present.
  */
 
@@ -43,19 +44,23 @@ enum Gscale {
   GFS_2000DPS = 0x18
 };
 
-const float alpha = 0.5;
+const float alpha = 0.01;
 
 // << DEVICE ADDRESSES >>
 #define AK8963_ADDRESS      0x0C    // Address of magnetometer
 #define MPU9250_ADDRESS     0xd0    // Device address when AD0 = GND
 
 #define AK8963_READ_BYTE    0x80
+#define Pi                  3.14159
 
 class MPU9250 : public scheduler_task
 {
     public:
         MPU9250(uint8_t priority) : scheduler_task("MPU9250", 512*4, priority)
         {
+            magbias[0] = +470.;  // User environmental x-axis correction in milliGauss, should be automatically calculated
+            magbias[1] = +120.;  // User environmental y-axis correction in milliGauss
+            magbias[2] = +125;   // User environmental z-axis correction in milliGauss
         }
 
         void verifyMPU9250(void)
@@ -152,12 +157,12 @@ class MPU9250 : public scheduler_task
             setAccScale(AFS_2G);
 
             // Initialize AK8963 device
-            verifyAK8963();
-
             configAK8963(AK8963_ADDRESS, AK8963_CNTL2, 0x81);
             mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_DO, 0x01);   // reset device
             mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_CTRL, 0x81);
             for(int i=0; i<1000;i++) {};
+
+            //verifyAK8963();
 
             configAK8963(AK8963_ADDRESS, AK8963_CNTL1, 0x81);
             mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_DO, 0x12);   // 16-bit output + "0010": Continuous measurement mode 1
@@ -239,7 +244,7 @@ class MPU9250 : public scheduler_task
 
             mpu.readRegisters(MPU9250_ADDRESS, EXT_SENS_DATA_00, response, sizeof(response));
             for(int i = 0; i < 3; i++) {
-                magnetometer_ASA[i] = ((((response[i] - 128) * 0.5)/ 128) + 1);
+                magnetometer_ASA[i] = (((response[i] - 128) / 256) + 1);
             }
             // Manufacturer sensitivity adjustment values
             u0_dbg_printf("ASAX: %f, ASAY: %f, ASAZ: %f\n", magnetometer_ASA[0], magnetometer_ASA[1], magnetometer_ASA[2]);
@@ -247,19 +252,32 @@ class MPU9250 : public scheduler_task
 
         void getCompass(float *gyroDegree)
         {
-            float rgx, rgy, rgz;
             // Read AK8963 register 0x03; We read 7 bytes so upon read of ST2 register 0x09,
             // the device will unlatch the data registers for next measurement read
             configAK8963(AK8963_ADDRESS | AK8963_READ_BYTE, AK8963_XOUT_L, 0x87);
 
-            rgx = (float)get16BitRegister(EXT_SENS_DATA_00) * magnetometer_ASA[0];
-            rgy = (float)get16BitRegister(EXT_SENS_DATA_02) * magnetometer_ASA[1];
-            rgz = (float)get16BitRegister(EXT_SENS_DATA_04) * magnetometer_ASA[2];
+            float mRes = 10.*4912./32760.0; // Proper scale to return milliGauss
 
-            float tempDegree = atan(rgy / rgz) * 57.295;
+            int16_t readMag[3];
+            readMag[0] = (float)get16BitRegister(EXT_SENS_DATA_00) * magnetometer_ASA[0] * mRes - magbias[0];
+            readMag[1] = (float)get16BitRegister(EXT_SENS_DATA_02) * magnetometer_ASA[1] * mRes - magbias[1];
+            readMag[2] = (float)get16BitRegister(EXT_SENS_DATA_04) * magnetometer_ASA[2] * mRes - magbias[2];
+
+            //Low Pass Filter
+            rgx = readMag[0] * alpha + (rgx * (1.0 - alpha));
+            rgy = readMag[1] * alpha + (rgy * (1.0 - alpha));
+            rgz = readMag[2] * alpha + (rgz * (1.0 - alpha));
+
+
+            float tempDegree = ((atan2f(-rgy , rgx) * 180) / Pi ) + declinationAngle;
+
             if(tempDegree < 0) {
-                tempDegree += 360;
+                tempDegree = 360 + tempDegree;
             }
+            if(tempDegree > 360) {
+                tempDegree = tempDegree - 360;
+            }
+
             *gyroDegree = tempDegree;
         }
 
@@ -269,10 +287,9 @@ class MPU9250 : public scheduler_task
             getRotation(&gyro_data[0], &gyro_data[1], &gyro_data[2]);           // Gyroscope
             getCompass(&mag_data);                                              // Magnetometer
 
-            //u0_dbg_printf("accX: %f, accY: %f\n", acc_data[0], acc_data[1]);
-            //u0_dbg_printf("mag: %f\n", mag_data);
+            u0_dbg_printf("accX: %f, accY: %f, mag: %f \n", acc_data[0], acc_data[1], mag_data);
 
-            vTaskDelay(1000);
+            vTaskDelay(1);
 
             return true;
         }
@@ -281,6 +298,10 @@ class MPU9250 : public scheduler_task
         I2C2 &mpu = I2C2::getInstance();        // Get I2C bus semaphore
 
         double fXg = 0, fYg = 0, fZg = 0;
+        float rgx = 0, rgy = 0, rgz = 0;
+
+        float magbias[3];
+        float declinationAngle = 13.53;            // Declination @ San Jose
 
         float acc_data[2];
         float gyro_data[3];
