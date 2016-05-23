@@ -23,6 +23,11 @@
 #include "printf_lib.h"     // u0_dbg_printf()
 #include "i2c2.hpp"         // for I2C bus access
 
+/// IDs used for getSharedObject() and addSharedObject()
+typedef enum {
+    shared_CompassID,
+} sharedHandleId_t;
+
 // See MPU-9250 Register Map and Descriptions, Revision 1.4 and MPU-9250 Product
 // Specifications Revision 1.0
 //
@@ -169,19 +174,24 @@ class MPU9250 : public scheduler_task
             mpu.writeReg(MPU9250_ADDRESS, I2C_SLV0_CTRL, 0x81);
 
             getCompass_calib();
+
+            /* Create queue and save shared handle by addSharedObject() */
+           QueueHandle_t obj = xQueueCreate(1, sizeof(float));
+           addSharedObject(shared_CompassID, obj);
+
             return true;
         }
 
         /**
          * Reads 16-bit register from reg and reg+1 granted that reg has MSB
          */
-        uint16_t get16BitRegister(unsigned char reg)
+        int16_t get16BitRegister(unsigned char reg)
         {
             uint8_t buff[2] = {0};
             mpu.readRegisters(MPU9250_ADDRESS, reg, &buff[0], sizeof(buff));
 
-            const uint16_t MSB = buff[0];
-            const uint16_t LSB = buff[1];
+            const int16_t MSB = buff[0];
+            const int16_t LSB = buff[1];
             return ((MSB << 8) | (LSB & 0xFF));
         }
 
@@ -239,10 +249,14 @@ class MPU9250 : public scheduler_task
 
         void getCompass_calib(void)
         {
-            uint8_t response[3];
+            int8_t response[3];
             configAK8963(AK8963_ADDRESS | AK8963_READ_BYTE, AK8963_ASAX, 0x83);
 
-            mpu.readRegisters(MPU9250_ADDRESS, EXT_SENS_DATA_00, response, sizeof(response));
+            //mpu.readRegisters(MPU9250_ADDRESS, EXT_SENS_DATA_00, response, (uint32_t)sizeof(response));
+
+            response[0] = get16BitRegister(EXT_SENS_DATA_00);
+            response[1] = get16BitRegister(EXT_SENS_DATA_02);
+            response[2] = get16BitRegister(EXT_SENS_DATA_04);
             for(int i = 0; i < 3; i++) {
                 magnetometer_ASA[i] = (((response[i] - 128) / 256) + 1);
             }
@@ -259,10 +273,10 @@ class MPU9250 : public scheduler_task
             float mRes = 10.*4912./32760.0; // Proper scale to return milliGauss
 
             int16_t readMag[3];
-            readMag[0] = (float)get16BitRegister(EXT_SENS_DATA_00) * magnetometer_ASA[0] * mRes - magbias[0];
-            readMag[1] = (float)get16BitRegister(EXT_SENS_DATA_02) * magnetometer_ASA[1] * mRes - magbias[1];
-            readMag[2] = (float)get16BitRegister(EXT_SENS_DATA_04) * magnetometer_ASA[2] * mRes - magbias[2];
-
+            gyroDegree[0] = (float)get16BitRegister(EXT_SENS_DATA_00) * magnetometer_ASA[0] * mRes - magbias[0];
+            gyroDegree[1] = (float)get16BitRegister(EXT_SENS_DATA_02) * magnetometer_ASA[1] * mRes - magbias[1];
+            gyroDegree[2] = (float)get16BitRegister(EXT_SENS_DATA_04) * magnetometer_ASA[2] * mRes - magbias[2];
+/*
             //Low Pass Filter
             rgx = readMag[0] * alpha + (rgx * (1.0 - alpha));
             rgy = readMag[1] * alpha + (rgy * (1.0 - alpha));
@@ -278,24 +292,43 @@ class MPU9250 : public scheduler_task
                 tempDegree = tempDegree - 360;
             }
 
-            *gyroDegree = tempDegree;
+            *gyroDegree = tempDegree;*/
         }
 
         bool run(void *p)
         {
-            getAcceleration(&acc_data[0], &acc_data[1]);                        // Accelerometer
-            getRotation(&gyro_data[0], &gyro_data[1], &gyro_data[2]);           // Gyroscope
-            getCompass(&mag_data);                                              // Magnetometer
+            //getAcceleration(&acc_data[0], &acc_data[1]);                        // Accelerometer
+            getRotation(&gyro_data[0], &gyro_data[1], &gyro_data[2]);           // Gyroscope                                             // Magnetometer
 
-            u0_dbg_printf("accX: %f, accY: %f, mag: %f \n", acc_data[0], acc_data[1], mag_data);
+            //u0_dbg_printf(" mag: %f %f %f\n", mag_data[0], mag_data[1], mag_data[2]);
 
-            vTaskDelay(1);
+            SoftTimer t;
+            if(sampling && !t.isRunning()) {
+                t.reset(48);
+                getCompass(mag_data);
+                gyro_data[2] /= gyroDivider;
+
+                sampling = false;
+
+            } else {
+                yaw = yaw + (gyro_data[2] * 0.048);
+                //u0_dbg_printf("yaw %f\n", yaw);
+
+                xQueueSend(getSharedObject(shared_CompassID), &yaw, portMAX_DELAY);
+                sampling = true;
+            }
+
+            //vTaskDelay(1);
 
             return true;
         }
 
     private:
+        float a = 0;
+
         I2C2 &mpu = I2C2::getInstance();        // Get I2C bus semaphore
+        bool sampling = true;
+        float yaw = 0;
 
         double fXg = 0, fYg = 0, fZg = 0;
         float rgx = 0, rgy = 0, rgz = 0;
@@ -305,7 +338,7 @@ class MPU9250 : public scheduler_task
 
         float acc_data[2];
         float gyro_data[3];
-        float mag_data;
+        float mag_data[3];
 
         float magnetometer_ASA[3];
         float accDivider = -1;
